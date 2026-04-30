@@ -1,0 +1,6 @@
+# Minimal deps for schwarzite_render.py (TB bands, BZ, topology tooling)
+numpy>=1.22
+matplotlib>=3.5
+scipy>=1.9
+ase>=3.22
+plotly>=5.18
