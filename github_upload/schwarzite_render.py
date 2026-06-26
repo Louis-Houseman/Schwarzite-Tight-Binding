@@ -72,10 +72,16 @@ SHELL_MIN_HOPS = None  # auto: max(12, N//6); or set explicit threshold for NN s
 SHELL_ENERGY_WINDOW = 4.0  # Plot bands within [-window, +window] around E=0 (set None for all bands)
 OUT_SHELL_BANDS = "bands_shells_L{L}_cut{cut:.2f}.png"
 DO_KPATH_VIZ = True
+# Overlay a legacy comparison loop on the k-path BZ figure (off by default; paper path only).
+DO_KPATH_COMPARE_SECOND = False
 OUT_KPATH_PNG = "kpath_reciprocal.png"
 OUT_KPATH_HTML = "kpath_reciprocal.html"
 OUT_BZ_RECIP_BASIS_PNG = "first_bz_reciprocal_basis.png"
 OUT_BZ_RECIP_BASIS_HTML = "first_bz_reciprocal_basis.html"
+# Wireframe first BZ + bold primitive reciprocal cell (PNG + interactive HTML), basis only — no k-path.
+DO_BZ_WIREFRAME_VIZ = True
+OUT_BZ_WIREFRAME_PNG = "bz_wireframe_basis.png"
+OUT_BZ_WIREFRAME_HTML = "bz_wireframe_basis.html"
 
 # --- True first Brillouin zone (Wigner–Seitz cell about Γ in reciprocal space) ---
 USE_TRUE_FIRST_BZ = True
@@ -139,6 +145,42 @@ N_SHOW = 8
 OUT_BANDS_ZOOM = "bands_zoom_cut{cut:.2f}_N{nshow}.png"
 GAP_TOL = 1e-3
 
+# --- Reciprocal-space naming (plots / band-path ticks): primitive reciprocal rows **a**, **b**, **c**
+# (numeric rows = ``reciprocal_lattice(cell)`` row 0,1,2). Half-way points X,Y,Z at ½**a**, ½**b**, ½**c**.
+RECIP_VEC_LABEL_MPL = (r"$\mathbf{a}$", r"$\mathbf{b}$", r"$\mathbf{c}$")
+RECIP_VEC_LABEL_PLAIN = ("a", "b", "c")
+DEFAULT_KPATH_VERTEX_LABELS = ["Y", "Γ", "Z", "W₁", "W₂", "W₃", "W₄"]
+KPATH_LEGEND_STD = "Y–Γ–Z–W₁–W₂–W₃–W₄"
+KPATH_LEGEND_PRIMITIVE_LOOP = "Γ–a–a+b–b–Γ"
+
+# High-symmetry + Weyl nodes (fractional reciprocal coords f, k_cart = f @ reciprocal rows).
+# Matches external BZ analysis / Fig. 4 band path: Y → Γ → Z → W₁ → W₂ → W₃ → W₄.
+REFERENCE_HS_POINTS: list[tuple[str, tuple[float, float, float]]] = [
+    ("Γ", (0.0, 0.0, 0.0)),
+    ("X", (0.5, 0.0, 0.0)),
+    ("Y", (0.0, 0.5, 0.0)),
+    ("Y₂", (0.0, -0.5, 0.0)),
+    ("Z", (0.0, 0.0, 0.5)),
+    ("V₂", (0.5, -0.5, 0.0)),
+    ("U₂", (-0.5, 0.0, 0.5)),
+    ("T₂", (0.0, -0.5, 0.5)),
+    ("R₂", (-0.5, -0.5, 0.5)),
+]
+REFERENCE_WEYL_POINTS: list[tuple[str, tuple[float, float, float]]] = [
+    ("W₁", (0.1224448, -0.2358748, -0.49708016)),
+    ("W₂", (-0.12272477, 0.23539968, 0.49615932)),
+    ("W₃", (0.07071221, 0.1808957, -0.25261623)),
+    ("W₄", (-0.07033161, -0.18122039, 0.25396826)),
+]
+PAPER_KPATH_NODES: list[tuple[str, tuple[float, float, float]]] = [
+    ("Y", (0.0, 0.5, 0.0)),
+    ("Γ", (0.0, 0.0, 0.0)),
+    ("Z", (0.0, 0.0, 0.5)),
+    *REFERENCE_WEYL_POINTS,
+]
+DO_REFERENCE_WEYL_MARKERS = True
+REFERENCE_WEYL_COLOR = "#e91e63"   # distinct magenta on wireframe
+
 
 def _set_output_dirs(mode_name: str) -> None:
     """Redirect all output paths into results/<mode_name>/figures and results/<mode_name>/data."""
@@ -146,6 +188,7 @@ def _set_output_dirs(mode_name: str) -> None:
     global OUT_FIG, OUT_HTML, OUT_H_TEMPLATE, OUT_BANDS, OUT_PATHSUM_BANDS
     global OUT_SHELL_BANDS, OUT_KPATH_PNG, OUT_KPATH_HTML
     global OUT_BZ_RECIP_BASIS_PNG, OUT_BZ_RECIP_BASIS_HTML
+    global OUT_BZ_WIREFRAME_PNG, OUT_BZ_WIREFRAME_HTML
     global OUT_CHERN_TXT, OUT_BERRY_PNG, OUT_WEYL_TXT
     global WEYL_REPORT, WEYL_REFINED, OUT_BANDS_ZOOM
 
@@ -165,6 +208,8 @@ def _set_output_dirs(mode_name: str) -> None:
     OUT_KPATH_HTML = os.path.join(FIG_DIR, "kpath_reciprocal.html")
     OUT_BZ_RECIP_BASIS_PNG = os.path.join(FIG_DIR, "first_bz_reciprocal_basis.png")
     OUT_BZ_RECIP_BASIS_HTML = os.path.join(FIG_DIR, "first_bz_reciprocal_basis.html")
+    OUT_BZ_WIREFRAME_PNG = os.path.join(FIG_DIR, "bz_wireframe_basis.png")
+    OUT_BZ_WIREFRAME_HTML = os.path.join(FIG_DIR, "bz_wireframe_basis.html")
     OUT_CHERN_TXT = os.path.join(DATA_DIR, "chern_results.txt")
     OUT_BERRY_PNG = os.path.join(FIG_DIR, "berry_flux_slice.png")
     OUT_WEYL_TXT = os.path.join(DATA_DIR, "weyl_candidates.txt")
@@ -1228,14 +1273,368 @@ def compute_true_first_bz(
     return vertices, hull, all_verts
 
 
+def _undirected_edges_from_hull(hull: ConvexHull) -> list[tuple[int, int]]:
+    """Unique undirected edges (vertex indices) on a 3D scipy ConvexHull."""
+    edge_set: set[tuple[int, int]] = set()
+    for tri in hull.simplices:
+        for i in range(3):
+            a = int(tri[i])
+            vb = int(tri[(i + 1) % 3])
+            if a > vb:
+                a, vb = vb, a
+            edge_set.add((a, vb))
+    return sorted(edge_set)
+
+
+def reference_weyl_points_kcart(b: np.ndarray) -> list[dict]:
+    """Cartesian k and fractional coords for ``REFERENCE_WEYL_POINTS``."""
+    b = np.asarray(b, dtype=float)
+    out: list[dict] = []
+    for label, f in REFERENCE_WEYL_POINTS:
+        f_arr = np.asarray(f, dtype=float)
+        k_cart = f_arr @ b
+        out.append({
+            "label": label,
+            "k_frac": f_arr,
+            "k_cart": k_cart,
+        })
+    return out
+
+
+def render_bz_wireframe_basis_style(
+    cell: np.ndarray,
+    out_png: str,
+    out_html: str | None = None,
+) -> None:
+    """
+    Paper-style reciprocal-space figure: **wireframe** first BZ (black edges), a **bold**
+    outline of the primitive reciprocal parallelepiped, reciprocal basis arrows
+    **a**, **b**, **c** (rows of ``reciprocal_lattice(cell)``), and markers **X**, **Y**, **Z**
+    at ½ **a**, ½ **b**, ½ **c**.
+
+    When ``DO_REFERENCE_WEYL_MARKERS`` is True, overlays ``REFERENCE_WEYL_POINTS`` as
+    distinct coloured markers (fractional coords → Cartesian via ``f @ b``).
+
+    No k-paths — use this to read off faces / compare to standard BZ drawings, then align
+    relabellings in code. Runs alongside ``plot_kpath_reciprocal`` from ``band_structure``.
+
+    PNG: Matplotlib static. HTML: Plotly (rotate/zoom); same geometric content only.
+    """
+    cell = np.asarray(cell, dtype=float)
+    b = reciprocal_lattice(cell)
+
+    print("Reciprocal primitive rows a, b, c (Å⁻¹); real-space rows satisfy aᵢ · vⱼ = 2π δᵢⱼ "
+          "with reciprocal primitive rows v ∈ {a, b, c}:")
+    for i in range(3):
+        nm = RECIP_VEC_LABEL_PLAIN[i]
+        print(f"  {nm} = [{b[i, 0]:+.6f}, {b[i, 1]:+.6f}, {b[i, 2]:+.6f}]  "
+              f"|{nm}| = {np.linalg.norm(b[i]):.6f}")
+
+    origin = np.zeros(3)
+    corners = [
+        origin,
+        b[0],
+        b[1],
+        b[2],
+        b[0] + b[1],
+        b[0] + b[2],
+        b[1] + b[2],
+        b[0] + b[1] + b[2],
+    ]
+    pp_edges = [
+        (0, 1), (0, 2), (0, 3),
+        (1, 4), (1, 5),
+        (2, 4), (2, 6),
+        (3, 5), (3, 6),
+        (4, 7), (5, 7), (6, 7),
+    ]
+
+    bz_vertices = None
+    bz_hull = None
+    bz_all = None
+    if USE_TRUE_FIRST_BZ:
+        try:
+            bz_vertices, bz_hull, bz_all = compute_true_first_bz(b)
+            print(f"Wireframe plot: first BZ {len(bz_vertices)} vertices, "
+                  f"{len(bz_hull.simplices)} faces, {len(_undirected_edges_from_hull(bz_hull))} edges")
+        except Exception as exc:
+            print(f"WARNING: could not mesh true first BZ ({exc}); drawing primitive cell + a,b,c only.")
+
+    ref_weyl: list[dict] = []
+    if DO_REFERENCE_WEYL_MARKERS:
+        ref_weyl = reference_weyl_points_kcart(b)
+        print(f"Reference Weyl markers ({len(ref_weyl)} points, fractional → Cartesian):")
+        for wp in ref_weyl:
+            kf = wp["k_frac"]
+            kc = wp["k_cart"]
+            print(f"  {wp['label']}: f=({kf[0]:+.6f},{kf[1]:+.6f},{kf[2]:+.6f})  "
+                  f"k=({kc[0]:+.6f},{kc[1]:+.6f},{kc[2]:+.6f})")
+
+    stacks = [np.array(corners), b, np.zeros((1, 3)), np.array([0.5 * b[i] for i in range(3)])]
+    if ref_weyl:
+        stacks.append(np.array([wp["k_cart"] for wp in ref_weyl], dtype=float))
+    if bz_all is not None:
+        stacks.append(np.asarray(bz_all, dtype=float))
+    all_coords = np.vstack(stacks)
+    mins = np.min(all_coords, axis=0)
+    maxs = np.max(all_coords, axis=0)
+    span = np.where(maxs - mins < 1e-12, 1.0, maxs - mins)
+    margin = 0.08 * span
+
+    # --- Matplotlib (wireframe + bold primitive cell) ---
+    fig = plt.figure(figsize=(9.5, 9))
+    ax = fig.add_subplot(111, projection="3d")
+
+    if bz_all is not None and bz_hull is not None:
+        for ia, ib in _undirected_edges_from_hull(bz_hull):
+            p0 = bz_all[ia]
+            p1 = bz_all[ib]
+            ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
+                    color="#0d0d0d", linewidth=1.35, alpha=0.95, zorder=4)
+
+    for i0, i1 in pp_edges:
+        c0, c1 = corners[i0], corners[i1]
+        ax.plot([c0[0], c1[0]], [c0[1], c1[1]], [c0[2], c1[2]],
+                color="#1a1a1a", linewidth=2.8, alpha=1.0, solid_capstyle="round", zorder=5)
+
+    basis_arrow = "#156936"
+    basis_lw = 2.35
+    for i in range(3):
+        ax.quiver(
+            0, 0, 0, b[i, 0], b[i, 1], b[i, 2],
+            arrow_length_ratio=0.09,
+            color=basis_arrow,
+            linewidth=basis_lw,
+        )
+        tip = b[i] * 1.07
+        ax.text(
+            float(tip[0]), float(tip[1]), float(tip[2]),
+            RECIP_VEC_LABEL_MPL[i],
+            fontsize=13,
+            color="#111111",
+            fontweight="bold",
+        )
+
+    ax.scatter([0], [0], [0], color="#1565c0", s=55, zorder=10, depthshade=False)
+    ax.text(0, 0, 0, r"  $\Gamma$", fontsize=11, ha="left", va="bottom", color="#111111")
+
+    hs_lbl = [r"$X$", r"$Y$", r"$Z$"]
+    hs_col = ["#6a1b9a", "#c62828", "#1565c0"]
+    for i in range(3):
+        hp = 0.5 * b[i]
+        ax.scatter([hp[0]], [hp[1]], [hp[2]], color=hs_col[i], s=40, zorder=9, depthshade=False)
+        ax.text(
+            float(hp[0]), float(hp[1]), float(hp[2]),
+            f"  {hs_lbl[i]}",
+            fontsize=11,
+            ha="left",
+            va="bottom",
+            color=hs_col[i],
+            fontweight="bold",
+        )
+
+    if ref_weyl:
+        wc = REFERENCE_WEYL_COLOR
+        for wp in ref_weyl:
+            kc = wp["k_cart"]
+            ax.scatter(
+                [kc[0]], [kc[1]], [kc[2]],
+                color=wc, s=90, marker="D", zorder=11, depthshade=False,
+                edgecolors="#4a0028", linewidths=0.6,
+            )
+            ax.text(
+                float(kc[0]), float(kc[1]), float(kc[2]),
+                f"  {wp['label']}",
+                fontsize=10,
+                ha="left",
+                va="bottom",
+                color=wc,
+                fontweight="bold",
+            )
+
+    ax.set_xlim(float(mins[0] - margin[0]), float(maxs[0] + margin[0]))
+    ax.set_ylim(float(mins[1] - margin[1]), float(maxs[1] + margin[1]))
+    ax.set_zlim(float(mins[2] - margin[2]), float(maxs[2] + margin[2]))
+
+    ax.set_xlabel("kx (Å⁻¹)")
+    ax.set_ylabel("ky (Å⁻¹)")
+    ax.set_zlabel("kz (Å⁻¹)")
+    ax.set_title(
+        r"First BZ (wireframe) + $\mathbf{a},\mathbf{b},\mathbf{c}$ + X,Y,Z + ref. Weyl"
+        if bz_all is not None else
+        r"Primitive cell + $\mathbf{a},\mathbf{b},\mathbf{c}$ + X,Y,Z + ref. Weyl",
+    )
+
+    rng = (maxs + margin) - (mins - margin)
+    try:
+        ax.set_box_aspect((float(rng[0]), float(rng[1]), float(rng[2])))
+    except Exception:
+        pass
+
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+    fig.savefig(out_png, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved wireframe BZ + basis PNG: {out_png}")
+
+    # --- Plotly: same geometry, interactive, no paths ---
+    if out_html is not None:
+        traces: list = []
+
+        if bz_all is not None and bz_hull is not None:
+            wx: list[float | None] = []
+            wy: list[float | None] = []
+            wz: list[float | None] = []
+            for ia, ib in _undirected_edges_from_hull(bz_hull):
+                p0 = bz_all[ia]
+                p1 = bz_all[ib]
+                wx.extend([float(p0[0]), float(p1[0]), None])
+                wy.extend([float(p0[1]), float(p1[1]), None])
+                wz.extend([float(p0[2]), float(p1[2]), None])
+            traces.append(go.Scatter3d(
+                x=wx, y=wy, z=wz,
+                mode="lines",
+                line=dict(color="#111111", width=5),
+                hoverinfo="skip",
+                name="first BZ (wireframe)",
+            ))
+
+        px: list[float | None] = []
+        py: list[float | None] = []
+        pz: list[float | None] = []
+        for i0, i1 in pp_edges:
+            c0, c1 = corners[i0], corners[i1]
+            px.extend([float(c0[0]), float(c1[0]), None])
+            py.extend([float(c0[1]), float(c1[1]), None])
+            pz.extend([float(c0[2]), float(c1[2]), None])
+        traces.append(go.Scatter3d(
+            x=px, y=py, z=pz,
+            mode="lines",
+            line=dict(color="#222222", width=9),
+            hoverinfo="skip",
+            name="primitive reciprocal cell",
+        ))
+
+        for i in range(3):
+            shaft = b[i]
+            traces.append(go.Scatter3d(
+                x=[0.0, float(shaft[0])],
+                y=[0.0, float(shaft[1])],
+                z=[0.0, float(shaft[2])],
+                mode="lines+text",
+                line=dict(color=basis_arrow, width=8),
+                text=["", RECIP_VEC_LABEL_PLAIN[i]],
+                textposition="top center",
+                textfont=dict(size=14, color="#111111", family="Arial Black"),
+                name=RECIP_VEC_LABEL_PLAIN[i],
+            ))
+            traces.append(go.Cone(
+                x=[float(shaft[0])],
+                y=[float(shaft[1])],
+                z=[float(shaft[2])],
+                u=[float(shaft[0] * 0.12)],
+                v=[float(shaft[1] * 0.12)],
+                w=[float(shaft[2] * 0.12)],
+                sizemode="absolute",
+                sizeref=float(np.linalg.norm(shaft) * 0.05),
+                colorscale=[[0, basis_arrow], [1, basis_arrow]],
+                showscale=False,
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+        traces.append(go.Scatter3d(
+            x=[float(0.5 * b[i][0]) for i in range(3)],
+            y=[float(0.5 * b[i][1]) for i in range(3)],
+            z=[float(0.5 * b[i][2]) for i in range(3)],
+            mode="markers+text",
+            marker=dict(size=8, color=["#6a1b9a", "#c62828", "#1565c0"]),
+            text=["X", "Y", "Z"],
+            textposition="top center",
+            textfont=dict(size=13, color="#111111", family="Arial Black"),
+            name="X,Y,Z (½a,½b,½c)",
+            hoverinfo="text",
+            hovertext=[
+                f"{lbl} = ½ {RECIP_VEC_LABEL_PLAIN[i]}"
+                for i, lbl in enumerate(["X", "Y", "Z"])
+            ],
+        ))
+
+        traces.append(go.Scatter3d(
+            x=[0.0], y=[0.0], z=[0.0],
+            mode="markers+text",
+            marker=dict(size=7, color="#1565c0"),
+            text=[r"Γ"],
+            textposition="bottom center",
+            textfont=dict(size=14, color="#111111"),
+            name="Γ",
+            hoverinfo="skip",
+        ))
+
+        if ref_weyl:
+            traces.append(go.Scatter3d(
+                x=[float(wp["k_cart"][0]) for wp in ref_weyl],
+                y=[float(wp["k_cart"][1]) for wp in ref_weyl],
+                z=[float(wp["k_cart"][2]) for wp in ref_weyl],
+                mode="markers+text",
+                marker=dict(
+                    size=10,
+                    color=REFERENCE_WEYL_COLOR,
+                    symbol="diamond",
+                    line=dict(width=1, color="#4a0028"),
+                ),
+                text=[wp["label"] for wp in ref_weyl],
+                textposition="top center",
+                textfont=dict(size=12, color=REFERENCE_WEYL_COLOR, family="Arial Black"),
+                name="reference Weyl (Bo)",
+                hoverinfo="text",
+                hovertext=[
+                    (f"{wp['label']}: f=({wp['k_frac'][0]:+.5f}, "
+                     f"{wp['k_frac'][1]:+.5f}, {wp['k_frac'][2]:+.5f})<br>"
+                     f"k=({wp['k_cart'][0]:+.5f}, {wp['k_cart'][1]:+.5f}, "
+                     f"{wp['k_cart'][2]:+.5f})")
+                    for wp in ref_weyl
+                ],
+            ))
+
+        xr = [float(mins[0] - margin[0]), float(maxs[0] + margin[0])]
+        yr = [float(mins[1] - margin[1]), float(maxs[1] + margin[1])]
+        zr = [float(mins[2] - margin[2]), float(maxs[2] + margin[2])]
+
+        fig_pl = go.Figure(data=traces)
+        wire_title = (
+            "First BZ (wireframe) + a,b,c + X,Y,Z + reference Weyl points"
+            if bz_all is not None else
+            "Primitive cell + a,b,c + X,Y,Z + reference Weyl points"
+        )
+        fig_pl.update_layout(
+            title=wire_title,
+            scene=dict(
+                aspectmode="data",
+                xaxis_title="kx (Å⁻¹)",
+                yaxis_title="ky (Å⁻¹)",
+                zaxis_title="kz (Å⁻¹)",
+                xaxis=dict(range=xr, backgroundcolor="rgba(250,250,250,0.4)"),
+                yaxis=dict(range=yr, backgroundcolor="rgba(250,250,250,0.4)"),
+                zaxis=dict(range=zr, backgroundcolor="rgba(250,250,250,0.4)"),
+            ),
+            margin=dict(l=0, r=0, b=0, t=52),
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        )
+
+        os.makedirs(os.path.dirname(out_html) or ".", exist_ok=True)
+        fig_pl.write_html(out_html, include_plotlyjs=True)
+        print(f"Saved wireframe BZ + basis HTML: {out_html}")
+
+
 def make_k_path(
     b: np.ndarray,
     n_per_segment: int = 60,
 ) -> tuple[np.ndarray, list[int], list[str]]:
     """
-    Generate a deterministic k-path in Cartesian coordinates.
+    Paper-style band-structure k-path in Cartesian coordinates.
 
-    Path: Gamma -> 1/2 b1 -> 1/2 b2 -> 1/2 b3 -> Gamma
+    Path (fractional reciprocal coords): **Y → Γ → Z → W₁ → W₂ → W₃ → W₄**
+    (see ``PAPER_KPATH_NODES``; k_cart = f @ reciprocal_lattice rows).
 
     Parameters
     ----------
@@ -1253,16 +1652,74 @@ def make_k_path(
     tick_labels : list[str]
         Labels for each endpoint.
     """
+    return _k_path_from_fractional_nodes(b, PAPER_KPATH_NODES, n_per_segment)
+
+
+def _k_path_from_fractional_nodes(
+    b: np.ndarray,
+    nodes_frac: list[tuple[str, tuple[float, float, float]]],
+    n_per_segment: int,
+) -> tuple[np.ndarray, list[int], list[str]]:
+    """Linear interpolation between labelled fractional reciprocal nodes."""
+    b = np.asarray(b, dtype=float)
+    labels = [lbl for lbl, _ in nodes_frac]
+    nodes_cart = [np.asarray(f, dtype=float) @ b for _, f in nodes_frac]
+
+    kpts_list: list[np.ndarray] = []
+    tick_idx: list[int] = [0]
+
+    for seg in range(len(nodes_cart) - 1):
+        k_start = nodes_cart[seg]
+        k_end = nodes_cart[seg + 1]
+        for i in range(n_per_segment):
+            frac = i / n_per_segment
+            kpts_list.append(k_start + frac * (k_end - k_start))
+    kpts_list.append(nodes_cart[-1])
+
+    for seg in range(1, len(nodes_cart)):
+        tick_idx.append(seg * n_per_segment)
+
+    return np.array(kpts_list), tick_idx, labels
+
+
+def make_k_path_legacy_gamma_xyz(
+    b: np.ndarray,
+    n_per_segment: int = 60,
+) -> tuple[np.ndarray, list[int], list[str]]:
+    """Legacy closed path Γ → X → Y → Z → Γ (X,Y,Z at ½ **a**, ½ **b**, ½ **c**)."""
+    b = np.asarray(b, dtype=float)
+    nodes_frac = [
+        ("Γ", (0.0, 0.0, 0.0)),
+        ("X", (0.5, 0.0, 0.0)),
+        ("Y", (0.0, 0.5, 0.0)),
+        ("Z", (0.0, 0.0, 0.5)),
+        ("Γ", (0.0, 0.0, 0.0)),
+    ]
+    return _k_path_from_fractional_nodes(b, nodes_frac, n_per_segment)
+
+
+def make_k_path_primitive_b1b2_loop(
+    b: np.ndarray,
+    n_per_segment: int = 45,
+) -> tuple[np.ndarray, list[int], list[str]]:
+    """
+    Closed loop in reciprocal Cartesian coords:
+        Γ → **a** → **a**+**b** → **b** → Γ
+    (Edges of the primitive reciprocal parallelogram spanned by rows **a** and **b**.)
+
+    Useful as a **reference path** overlaid on the true first BZ alongside the
+    paper path (``make_k_path``).
+    """
     b = np.asarray(b, dtype=float)
     gamma = np.zeros(3)
     nodes = [
         gamma,
-        0.5 * b[0],
-        0.5 * b[1],
-        0.5 * b[2],
+        b[0],
+        b[0] + b[1],
+        b[1],
         gamma,
     ]
-    labels = ["Γ", "½b1", "½b2", "½b3", "Γ"]
+    labels = ["Γ", "a", "a+b", "b", "Γ"]
 
     kpts_list: list[np.ndarray] = []
     tick_idx: list[int] = [0]
@@ -1273,10 +1730,8 @@ def make_k_path(
         for i in range(n_per_segment):
             frac = i / n_per_segment
             kpts_list.append(k_start + frac * (k_end - k_start))
-    # Append the final endpoint
     kpts_list.append(nodes[-1])
 
-    # Tick indices: 0, n, 2n, 3n, 4n (= len-1)
     for seg in range(1, len(nodes)):
         tick_idx.append(seg * n_per_segment)
 
@@ -1295,17 +1750,19 @@ def render_first_bz_reciprocal_basis(
     """Plot the true first BZ with reciprocal basis vectors only.
 
     Draws the Wigner–Seitz cell (when ``USE_TRUE_FIRST_BZ``), a faint primitive
-    reciprocal parallelepiped, and arrows **b₁, b₂, b₃** (rows of
-    ``reciprocal_lattice(cell)``). Does **not** draw any band-structure k-path;
-    paths belong in ``band_structure`` / ``plot_kpath_reciprocal``.
+    reciprocal parallelepiped, and arrows **a**, **b**, **c** (rows of
+    ``reciprocal_lattice(cell)``). Does **not** draw band-structure k-paths here.
+    For **BZ + path in one figure**, use ``plot_first_bz_with_kpaths`` or run
+    ``band_structure`` (which calls ``plot_kpath_reciprocal`` → combined plot).
     """
     cell = np.asarray(cell, dtype=float)
     b = reciprocal_lattice(cell)
 
-    print("Reciprocal basis rows bᵢ (Å⁻¹), with real-space rows aᵢ · bⱼ = 2π δᵢⱼ:")
+    print("Reciprocal primitive rows a, b, c (Å⁻¹); real-space rows satisfy aᵢ · vⱼ = 2π δᵢⱼ:")
     for i in range(3):
-        print(f"  b{i + 1} = [{b[i, 0]:+.6f}, {b[i, 1]:+.6f}, {b[i, 2]:+.6f}]  "
-              f"|b{i + 1}| = {np.linalg.norm(b[i]):.6f}")
+        nm = RECIP_VEC_LABEL_PLAIN[i]
+        print(f"  {nm} = [{b[i, 0]:+.6f}, {b[i, 1]:+.6f}, {b[i, 2]:+.6f}]  "
+              f"|{nm}| = {np.linalg.norm(b[i]):.6f}")
 
     origin = np.zeros(3)
     corners = [
@@ -1359,7 +1816,7 @@ def render_first_bz_reciprocal_basis(
         ax.quiver(0, 0, 0, b[i, 0], b[i, 1], b[i, 2],
                   arrow_length_ratio=0.08, color=arrow_colors[i], linewidth=2.0)
         ax.text(b[i, 0] * 1.08, b[i, 1] * 1.08, b[i, 2] * 1.08,
-                f"b{i + 1}", color=arrow_colors[i], fontsize=11, fontweight="bold")
+                RECIP_VEC_LABEL_MPL[i], color=arrow_colors[i], fontsize=11, fontweight="bold")
 
     ax.scatter([0], [0], [0], color="black", s=45, zorder=7)
     ax.text(0, 0, 0, "  Γ", fontsize=10, ha="left", va="bottom")
@@ -1367,7 +1824,7 @@ def render_first_bz_reciprocal_basis(
     ax.set_xlabel("kx (Å⁻¹)")
     ax.set_ylabel("ky (Å⁻¹)")
     ax.set_zlabel("kz (Å⁻¹)")
-    ax.set_title("First BZ + reciprocal basis b₁, b₂, b₃ (no band k-path)")
+    ax.set_title(r"First BZ + reciprocal basis $\mathbf{a},\mathbf{b},\mathbf{c}$ (no band k-path)")
 
     stacks = [np.array(corners), b]
     if bz_vertices is not None:
@@ -1425,12 +1882,14 @@ def render_first_bz_reciprocal_basis(
             x=[0, float(b[i, 0])], y=[0, float(b[i, 1])], z=[0, float(b[i, 2])],
             mode="lines+text",
             line=dict(color=arrow_hex[i], width=5),
-            text=["", f"b{i + 1}"],
+            text=["", RECIP_VEC_LABEL_PLAIN[i]],
             textposition="top center",
             textfont=dict(size=12, color=arrow_hex[i]),
             hoverinfo="text",
-            hovertext=f"b{i + 1} = [{b[i, 0]:.5f}, {b[i, 1]:.5f}, {b[i, 2]:.5f}]",
-            name=f"b{i + 1}",
+            hovertext=(
+                f"{RECIP_VEC_LABEL_PLAIN[i]} = [{b[i, 0]:.5f}, {b[i, 1]:.5f}, {b[i, 2]:.5f}]"
+            ),
+            name=RECIP_VEC_LABEL_PLAIN[i],
         ))
         shaft = b[i]
         traces.append(go.Cone(
@@ -1457,7 +1916,7 @@ def render_first_bz_reciprocal_basis(
 
     fig_pl = go.Figure(data=traces)
     fig_pl.update_layout(
-        title="First BZ + reciprocal basis (no band k-path)",
+        title=r"First BZ + reciprocal basis $\mathbf{a},\mathbf{b},\mathbf{c}$ (no band k-path)",
         scene=dict(
             aspectmode="data",
             xaxis_title="kx (Å⁻¹)",
@@ -1472,49 +1931,40 @@ def render_first_bz_reciprocal_basis(
     print("(Band-structure k-paths are plotted separately; arrows are not the path.)")
 
 
-def plot_kpath_reciprocal(
+def plot_first_bz_with_kpaths(
     cell: np.ndarray,
-    kpts: np.ndarray,
-    tick_idx: list[int],
-    tick_labels: list[str],
+    paths: list[dict],
     out_png: str,
     out_html: str | None = None,
 ) -> None:
     """
-    Plot a 3D diagram of the k-path in reciprocal space.
+    Single 3D figure: true first Brillouin zone (when available), primitive reciprocal
+    cell outline, reciprocal basis arrows, and one or more k-path polylines with
+    labelled vertices.
 
-    Shows reciprocal lattice vectors **b₁, b₂, b₃** as arrows from Γ (these are
-    the reciprocal basis vectors, not substitutes for the path direction),
-    the true first Brillouin zone when USE_TRUE_FIRST_BZ is enabled, the
-    primitive reciprocal parallelepiped as faint edges, the band-structure **k-path**
-    as a separate polyline with labelled nodes.
+    Each entry in ``paths`` is a dict with keys:
+      - ``kpts`` : (Nk, 3) Cartesian k-points (Å⁻¹)
+      - ``tick_idx`` : indices of labelled vertices along the polyline
+      - ``tick_labels`` : str labels for those vertices
+      - ``color`` : matplotlib line colour (e.g. "#111111")
+      - ``name`` : legend name for this polyline
+      - ``linestyle`` : optional, default "-" (matplotlib only; Plotly uses solid lines)
 
-    Parameters
-    ----------
-    cell : np.ndarray, shape (3, 3)
-        Real-space lattice vectors as rows.
-    kpts : np.ndarray, shape (Nk, 3)
-        k-points in Cartesian coordinates (the path).
-    tick_idx : list[int]
-        Indices into kpts for the path node points.
-    tick_labels : list[str]
-        Labels for each node point.
-    out_png : str
-        Output path for matplotlib PNG.
-    out_html : str or None
-        If not None, output path for interactive Plotly HTML.
+    Axis limits use all paths plus BZ vertices so the full Wigner–Seitz cell stays
+    visible (avoids quadrant-only cropping when the path sits in k>0 octant).
     """
+    if not paths:
+        raise ValueError("paths must contain at least one path specification.")
+
+    cell = np.asarray(cell, dtype=float)
     b = reciprocal_lattice(cell)
 
-    print("Reciprocal lattice vectors (1/Angstrom):")
+    print("Reciprocal primitive rows a, b, c (1/Angstrom), rows of reciprocal_lattice(cell):")
     for i in range(3):
-        print(f"  b{i+1} = [{b[i, 0]:+.6f}, {b[i, 1]:+.6f}, {b[i, 2]:+.6f}]  "
-              f"|b{i+1}| = {np.linalg.norm(b[i]):.6f}")
+        nm = RECIP_VEC_LABEL_PLAIN[i]
+        print(f"  {nm} = [{b[i, 0]:+.6f}, {b[i, 1]:+.6f}, {b[i, 2]:+.6f}]  "
+              f"|{nm}| = {np.linalg.norm(b[i]):.6f}")
 
-    # Node points along the path
-    node_pts = np.array([kpts[idx] for idx in tick_idx])
-
-    # Parallelepiped: 12 edges of the cell spanned by b1, b2, b3
     origin = np.zeros(3)
     corners = [
         origin,
@@ -1540,11 +1990,23 @@ def plot_kpath_reciprocal(
     if USE_TRUE_FIRST_BZ:
         try:
             bz_vertices, bz_hull, bz_all = compute_true_first_bz(b)
-            print(f"True first BZ (k-path plot): {len(bz_vertices)} vertices, "
+            print(f"True first BZ (combined plot): {len(bz_vertices)} vertices, "
                   f"{len(bz_hull.simplices)} faces")
         except Exception as exc:
             print(f"WARNING: could not mesh true first BZ ({exc}); "
                   f"plotting primitive parallelepiped only.")
+
+    stacks_for_limits = [np.array(corners)]
+    if bz_vertices is not None:
+        stacks_for_limits.append(np.asarray(bz_vertices, dtype=float))
+    for spec in paths:
+        stacks_for_limits.append(np.asarray(spec["kpts"], dtype=float))
+
+    all_lim = np.vstack(stacks_for_limits)
+    mins = np.min(all_lim, axis=0)
+    maxs = np.max(all_lim, axis=0)
+    span = np.where(maxs - mins < 1e-12, 1.0, maxs - mins)
+    margin = 0.06 * span
 
     # --- Matplotlib PNG ---
     fig = plt.figure(figsize=(9, 9))
@@ -1561,60 +2023,80 @@ def plot_kpath_reciprocal(
         )
         ax.add_collection3d(bz_poly)
 
-    # Parallelepiped edges
     for i0, i1 in pp_edges:
         c0, c1 = corners[i0], corners[i1]
         ax.plot([c0[0], c1[0]], [c0[1], c1[1]], [c0[2], c1[2]],
-                color="gray", linewidth=0.5, alpha=0.3)
+                color="gray", linewidth=0.5, alpha=0.35)
 
-    # Reciprocal lattice vector arrows
     arrow_colors = ["#d62728", "#2ca02c", "#1f77b4"]
     for i in range(3):
         ax.quiver(0, 0, 0, b[i, 0], b[i, 1], b[i, 2],
                   arrow_length_ratio=0.08, color=arrow_colors[i], linewidth=1.5)
         ax.text(b[i, 0] * 1.08, b[i, 1] * 1.08, b[i, 2] * 1.08,
-                f"b{i+1}", color=arrow_colors[i], fontsize=10, fontweight="bold")
+                RECIP_VEC_LABEL_MPL[i], color=arrow_colors[i], fontsize=10, fontweight="bold")
 
-    # k-path polyline
-    ax.plot(kpts[:, 0], kpts[:, 1], kpts[:, 2],
-            color="black", linewidth=1.2, alpha=0.8)
+    for pi, spec in enumerate(paths):
+        kpts = np.asarray(spec["kpts"], dtype=float)
+        tick_idx = spec["tick_idx"]
+        tick_labels = spec["tick_labels"]
+        color = spec.get("color", "#111111")
+        name = spec.get("name", f"path {pi + 1}")
+        linestyle = spec.get("linestyle", "-")
 
-    # Node points with labels
-    ax.scatter(node_pts[:, 0], node_pts[:, 1], node_pts[:, 2],
-               color="black", s=40, zorder=5)
-    for idx_i, label in zip(tick_idx, tick_labels):
-        pt = kpts[idx_i]
-        ax.text(pt[0], pt[1], pt[2], f"  {label}", fontsize=9,
-                ha="left", va="bottom")
+        ax.plot(kpts[:, 0], kpts[:, 1], kpts[:, 2],
+                color=color, linewidth=2.0, alpha=0.9, linestyle=linestyle,
+                label=name)
+
+        node_pts = np.array([kpts[idx] for idx in tick_idx])
+        ax.scatter(node_pts[:, 0], node_pts[:, 1], node_pts[:, 2],
+                   color=color, s=42, zorder=6)
+        label_offset = margin * (0.35 + 0.25 * pi)
+        for idx_i, lbl in zip(tick_idx, tick_labels):
+            pt = kpts[idx_i]
+            ax.text(
+                pt[0] + label_offset[0],
+                pt[1] + label_offset[1],
+                pt[2] + label_offset[2],
+                f"{lbl}",
+                fontsize=9,
+                color=color,
+                ha="left",
+                va="bottom",
+            )
+
+    ax.set_xlim(float(mins[0] - margin[0]), float(maxs[0] + margin[0]))
+    ax.set_ylim(float(mins[1] - margin[1]), float(maxs[1] + margin[1]))
+    ax.set_zlim(float(mins[2] - margin[2]), float(maxs[2] + margin[2]))
 
     ax.set_xlabel("kx (Å⁻¹)")
     ax.set_ylabel("ky (Å⁻¹)")
     ax.set_zlabel("kz (Å⁻¹)")
-    ax.set_title(
-        "k-path in reciprocal space (true first BZ + primitive cell outline)"
+    n_paths = len(paths)
+    title_core = (
+        f"First BZ + {n_paths} k-path(s)"
         if bz_all is not None else
-        "k-path in reciprocal space"
+        f"Primitive reciprocal cell + {n_paths} k-path(s)"
     )
+    ax.set_title(title_core)
+    ax.legend(loc="upper left", fontsize=8, framealpha=0.88)
 
-    stacks = [np.array(corners), kpts, node_pts]
-    if bz_vertices is not None:
-        stacks.append(bz_vertices)
-    all_coords = np.vstack(stacks)
-    ranges = np.ptp(all_coords, axis=0)
-    ranges = np.where(ranges == 0.0, 1.0, ranges)
+    ranges_plot = (maxs + margin) - (mins - margin)
     try:
-        ax.set_box_aspect((float(ranges[0]), float(ranges[1]), float(ranges[2])))
+        ax.set_box_aspect((
+            float(ranges_plot[0]),
+            float(ranges_plot[1]),
+            float(ranges_plot[2]),
+        ))
     except Exception:
         pass
 
-    os.makedirs(os.path.dirname(out_png), exist_ok=True)
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved k-path PNG: {out_png}")
+    print(f"Saved BZ + k-path PNG: {out_png}")
 
     # --- Plotly HTML (optional) ---
     if out_html is not None:
-        # Parallelepiped edges as a single line trace with None separators
         pp_x: list[float | None] = []
         pp_y: list[float | None] = []
         pp_z: list[float | None] = []
@@ -1627,12 +2109,11 @@ def plot_kpath_reciprocal(
         trace_pp = go.Scatter3d(
             x=pp_x, y=pp_y, z=pp_z,
             mode="lines",
-            line=dict(color="rgba(150,150,150,0.3)", width=2),
+            line=dict(color="rgba(150,150,150,0.35)", width=2),
             hoverinfo="skip",
-            name="parallelepiped",
+            name="primitive cell",
         )
 
-        # Reciprocal vectors as line traces (arrow tips approximated by cones)
         arrow_traces = []
         arrow_hex = ["#d62728", "#2ca02c", "#1f77b4"]
         for i in range(3):
@@ -1640,14 +2121,15 @@ def plot_kpath_reciprocal(
                 x=[0, float(b[i, 0])], y=[0, float(b[i, 1])], z=[0, float(b[i, 2])],
                 mode="lines+text",
                 line=dict(color=arrow_hex[i], width=4),
-                text=["", f"b{i+1}"],
+                text=["", RECIP_VEC_LABEL_PLAIN[i]],
                 textposition="top center",
                 textfont=dict(size=12, color=arrow_hex[i]),
                 hoverinfo="text",
-                hovertext=f"b{i+1} = [{b[i,0]:.4f}, {b[i,1]:.4f}, {b[i,2]:.4f}]",
-                name=f"b{i+1}",
+                hovertext=(
+                    f"{RECIP_VEC_LABEL_PLAIN[i]} = [{b[i,0]:.4f}, {b[i,1]:.4f}, {b[i,2]:.4f}]"
+                ),
+                name=RECIP_VEC_LABEL_PLAIN[i],
             ))
-            # Cone at tip for arrowhead
             shaft = b[i]
             arrow_traces.append(go.Cone(
                 x=[float(shaft[0])], y=[float(shaft[1])], z=[float(shaft[2])],
@@ -1661,31 +2143,6 @@ def plot_kpath_reciprocal(
                 showlegend=False,
             ))
 
-        # k-path polyline
-        trace_path = go.Scatter3d(
-            x=kpts[:, 0].tolist(), y=kpts[:, 1].tolist(), z=kpts[:, 2].tolist(),
-            mode="lines",
-            line=dict(color="black", width=3),
-            hoverinfo="skip",
-            name="k-path",
-        )
-
-        # Node points
-        trace_nodes = go.Scatter3d(
-            x=node_pts[:, 0].tolist(),
-            y=node_pts[:, 1].tolist(),
-            z=node_pts[:, 2].tolist(),
-            mode="markers+text",
-            marker=dict(size=5, color="black"),
-            text=tick_labels,
-            textposition="top center",
-            textfont=dict(size=11),
-            hoverinfo="text",
-            hovertext=[f"{lbl} ({node_pts[i,0]:.4f}, {node_pts[i,1]:.4f}, {node_pts[i,2]:.4f})"
-                        for i, lbl in enumerate(tick_labels)],
-            name="nodes",
-        )
-
         traces_out: list = []
         if bz_all is not None and bz_hull is not None:
             traces_out.append(go.Mesh3d(
@@ -1695,43 +2152,111 @@ def plot_kpath_reciprocal(
                 i=bz_hull.simplices[:, 0],
                 j=bz_hull.simplices[:, 1],
                 k=bz_hull.simplices[:, 2],
-                opacity=0.12,
+                opacity=0.14,
                 color="#4cc9f0",
                 name="first BZ",
             ))
 
         traces_out.append(trace_pp)
         traces_out.extend(arrow_traces)
-        traces_out.extend([trace_path, trace_nodes])
+
+        for pi, spec in enumerate(paths):
+            kpts = np.asarray(spec["kpts"], dtype=float)
+            tick_idx = spec["tick_idx"]
+            tick_labels = spec["tick_labels"]
+            color = spec.get("color", "#111111")
+            name = spec.get("name", f"path {pi + 1}")
+            node_pts = np.array([kpts[idx] for idx in tick_idx])
+
+            traces_out.append(go.Scatter3d(
+                x=kpts[:, 0].tolist(),
+                y=kpts[:, 1].tolist(),
+                z=kpts[:, 2].tolist(),
+                mode="lines",
+                line=dict(color=color, width=4),
+                hoverinfo="skip",
+                name=name,
+            ))
+            traces_out.append(go.Scatter3d(
+                x=node_pts[:, 0].tolist(),
+                y=node_pts[:, 1].tolist(),
+                z=node_pts[:, 2].tolist(),
+                mode="markers+text",
+                marker=dict(size=6, color=color),
+                text=tick_labels,
+                textposition="top center",
+                textfont=dict(size=11, color=color),
+                hoverinfo="text",
+                hovertext=[
+                    f"{lbl} ({node_pts[i,0]:.4f}, {node_pts[i,1]:.4f}, {node_pts[i,2]:.4f})"
+                    for i, lbl in enumerate(tick_labels)
+                ],
+                name=f"{name} (nodes)",
+            ))
+
+        xr = [float(mins[0] - margin[0]), float(maxs[0] + margin[0])]
+        yr = [float(mins[1] - margin[1]), float(maxs[1] + margin[1])]
+        zr = [float(mins[2] - margin[2]), float(maxs[2] + margin[2])]
 
         fig_plotly = go.Figure(data=traces_out)
         fig_plotly.update_layout(
-            title=(
-                "k-path in reciprocal space (true first BZ)"
-                if bz_all is not None else
-                "k-path in reciprocal space"
-            ),
+            title=title_core,
             scene=dict(
                 aspectmode="data",
                 xaxis_title="kx (Å⁻¹)",
                 yaxis_title="ky (Å⁻¹)",
                 zaxis_title="kz (Å⁻¹)",
+                xaxis=dict(range=xr),
+                yaxis=dict(range=yr),
+                zaxis=dict(range=zr),
             ),
-            margin=dict(l=0, r=0, b=0, t=40),
+            margin=dict(l=0, r=0, b=0, t=48),
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
         )
 
-        os.makedirs(os.path.dirname(out_html), exist_ok=True)
+        os.makedirs(os.path.dirname(out_html) or ".", exist_ok=True)
         fig_plotly.write_html(out_html, include_plotlyjs=True)
-        print(f"Saved k-path HTML: {out_html}")
+        print(f"Saved BZ + k-path HTML: {out_html}")
 
-    # Interpretation
     print("Note: shaded polyhedron is the true first Brillouin zone when available; "
-          "gray dashed box is the primitive reciprocal cell.")
-    print("Note: path endpoints (½b1, ½b2, ½b3) are NOT guaranteed high-symmetry")
-    print("  points for an arbitrary triclinic cell. They are simply endpoints along")
-    print("  reciprocal basis directions. True high-symmetry paths require space")
-    print("  group / Bravais lattice classification (out of scope for this milestone).")
+          "gray edges outline the primitive reciprocal parallelepiped.")
+    print("Note: Γ–X–Y–Z on the wireframe are ½ **a**, ½ **b**, ½ **c**; the band path "
+          "follows Y–Γ–Z–W₁–… from ``PAPER_KPATH_NODES``.")
 
+
+def plot_kpath_reciprocal(
+    cell: np.ndarray,
+    kpts: np.ndarray,
+    tick_idx: list[int],
+    tick_labels: list[str],
+    out_png: str,
+    out_html: str | None = None,
+) -> None:
+    """
+    Plot k-path(s) together with the first Brillouin zone (``plot_first_bz_with_kpaths``).
+
+    When ``DO_KPATH_COMPARE_SECOND`` is True, overlays the legacy Γ–a–a+b–b–Γ loop.
+    """
+    b = reciprocal_lattice(cell)
+    paths: list[dict] = [{
+        "kpts": kpts,
+        "tick_idx": tick_idx,
+        "tick_labels": tick_labels,
+        "color": "#111111",
+        "linestyle": "-",
+        "name": KPATH_LEGEND_STD,
+    }]
+    if DO_KPATH_COMPARE_SECOND:
+        k2, t2, l2 = make_k_path_primitive_b1b2_loop(b, n_per_segment=45)
+        paths.append({
+            "kpts": k2,
+            "tick_idx": t2,
+            "tick_labels": l2,
+            "color": "#c0392b",
+            "linestyle": "--",
+            "name": KPATH_LEGEND_PRIMITIVE_LOOP,
+        })
+    plot_first_bz_with_kpaths(cell, paths, out_png, out_html)
 
 def band_structure(
     atoms: Atoms,
@@ -1787,6 +2312,12 @@ def band_structure(
     if DO_KPATH_VIZ:
         plot_kpath_reciprocal(cell, kpts, tick_idx, tick_labels,
                               OUT_KPATH_PNG, OUT_KPATH_HTML)
+    if DO_BZ_WIREFRAME_VIZ:
+        render_bz_wireframe_basis_style(
+            cell,
+            OUT_BZ_WIREFRAME_PNG,
+            OUT_BZ_WIREFRAME_HTML if EXPORT_INTERACTIVE else None,
+        )
 
     # Gamma-point sanity check: H(k=0) should match real-space H built from same edges
     h_gamma = build_tb_hamiltonian_k(n, edges_pbc, np.zeros(3), t, onsite,
@@ -1818,7 +2349,7 @@ def band_structure(
                                                          reciprocal_b=b))
     max_diff_per = float(np.max(np.abs(evals_k - evals_kG)))
     if max_diff_per < 1e-8:
-        print(f"Periodicity check PASSED: E(0.1*b1) == E(0.1*b1 + b1) (max diff = {max_diff_per:.2e})")
+        print(f"Periodicity check PASSED: E(0.1*a) == E(0.1*a + a) (max diff = {max_diff_per:.2e})")
     else:
         print(f"WARNING: Periodicity check FAILED: max |E(k) - E(k+G)| = {max_diff_per:.2e}")
 
@@ -4371,7 +4902,7 @@ def main() -> None:
     # --- Optional: geometry-only BZ figure (no TB model, no k-path) ---
     print("\n" + "=" * 50)
     print("START")
-    print("  0) First Brillouin zone + reciprocal basis vectors b₁,b₂,b₃ only")
+    print("  0) First Brillouin zone + reciprocal basis vectors a, b, c only")
     print("     (saves under figures/ if you exit here; no band k-path drawn)")
     print("  1) Continue to tight-binding (model + task menus)")
     print("=" * 50)
